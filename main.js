@@ -221,57 +221,34 @@ async function syncDirectory(dirHandle, virtualPath) {
         const childPath = `${virtualPath}/${name}`;
 
         if (handle.kind === 'directory') {
-            // Only sync necessary directories for iPod structure
-            // iPod_Control, iTunes, Device, Artwork - always sync these
-            if (name === 'iPod_Control' || name === 'iTunes' || name === 'Device' || name === 'Artwork') {
+            // Only sync directories that contain database/config files
+            // We DON'T sync Music or Artwork - those contain large files we don't need in RAM
+            // libgpod only needs iTunesDB and device info files
+            if (name === 'iPod_Control') {
                 await syncDirectory(handle, childPath);
-            } else if (name === 'Music') {
-                // For Music directory, sync it but skip empty F## folders
-                // We'll only sync F## folders that actually contain files
+            } else if (name === 'iTunes' || name === 'Device') {
+                // Sync iTunes (has iTunesDB) and Device (has device info)
                 await syncDirectory(handle, childPath);
-            } else if (name.match(/^F\d{2}$/i)) {
-                // Skip F## folders during initial sync - they'll be created when needed
-                // Only sync if they contain actual files
-                let hasFiles = false;
-                try {
-                    for await (const [childName, childHandle] of handle.entries()) {
-                        if (childHandle.kind === 'file') {
-                            hasFiles = true;
-                            break;
-                        }
-                    }
-                } catch (e) {
-                    // Can't read directory, skip it
-                }
-                
-                if (hasFiles) {
-                    // Only create directory and sync if it has files
-                    try {
-                        Module.FS.mkdir(childPath);
-                    } catch (e) {
-                        // Directory exists
-                    }
-                    await syncDirectory(handle, childPath);
-                }
-                // Otherwise, skip empty F## folders completely
             }
+            // Skip Music, Artwork, and all other directories - we don't need them in virtual FS
         } else if (handle.kind === 'file') {
-            // Log all files we encounter in iTunes folder for debugging
-            if (virtualPath.includes('iTunes')) {
-                log(`Found file in iTunes: ${name}`, 'info');
-            }
-
-            // Sync database files and audio - be more inclusive with iTunes folder files
+            // Only sync small database/config files to virtual FS
+            // DO NOT sync audio files or artwork - they're huge and not needed in RAM
+            // libgpod only needs the database files to read track metadata
             const lowerName = name.toLowerCase();
             const isItunesFile = lowerName.startsWith('itunes') || lowerName.startsWith('itunesdb');
             const isDeviceFile = name === 'DeviceInfo' || name === 'SysInfo' || name === 'SysInfoExtended';
-            const isAudioFile = lowerName.endsWith('.mp3') || lowerName.endsWith('.m4a') ||
-                               lowerName.endsWith('.aac') || lowerName.endsWith('.wav');
-            const isArtworkFile = lowerName.endsWith('.ithmb') || lowerName.endsWith('.itdb');
-
-            if (isItunesFile || isDeviceFile || isAudioFile || isArtworkFile) {
+            
+            // Only sync iTunes database/config files and device info files
+            // Audio files are handled separately when uploading, and we read them
+            // directly from the real filesystem, not from virtual FS
+            if (isItunesFile || isDeviceFile) {
+                if (virtualPath.includes('iTunes')) {
+                    log(`Found file in iTunes: ${name}`, 'info');
+                }
                 await syncFile(handle, childPath);
             }
+            // Skip audio files and artwork - they don't need to be in RAM
         }
     }
 }
@@ -417,13 +394,12 @@ async function syncVirtualFSToIpod() {
         await syncVirtualFileToReal('/iPod/iPod_Control/iTunes/iTunesDB',
             ['iPod_Control', 'iTunes'], 'iTunesDB');
 
-        // Sync iTunesSD if it exists
-        try {
-            await syncVirtualFileToReal('/iPod/iPod_Control/iTunes/iTunesSD',
-                ['iPod_Control', 'iTunes'], 'iTunesSD');
-        } catch (e) {
-            // iTunesSD might not exist - that's fine
-        }
+        // Sync iTunesSD if it exists (optional file - not all iPods have it)
+        await syncVirtualFileToReal('/iPod/iPod_Control/iTunes/iTunesSD',
+            ['iPod_Control', 'iTunes'], 'iTunesSD', true);
+
+        // Sync uploaded music files from virtual FS to real FS
+        await syncMusicFilesToReal();
 
         log('Sync complete', 'success');
     } catch (e) {
@@ -432,13 +408,88 @@ async function syncVirtualFSToIpod() {
     }
 }
 
-async function syncVirtualFileToReal(virtualPath, dirPath, fileName) {
+async function syncMusicFilesToReal() {
+    if (!ipodHandle) return;
+
+    try {
+        const vfsMusicPath = '/iPod/iPod_Control/Music';
+        
+        // Check if Music directory exists in virtual FS
+        let folders;
+        try {
+            folders = Module.FS.readdir(vfsMusicPath).filter(f => f.match(/^F\d{2}$/i));
+        } catch (e) {
+            // No Music directory or no folders yet
+            return;
+        }
+
+        if (folders.length === 0) return;
+
+        // Get Music directory handle on real iPod
+        const iPodControlHandle = await ipodHandle.getDirectoryHandle('iPod_Control', { create: true });
+        const musicHandle = await iPodControlHandle.getDirectoryHandle('Music', { create: true });
+
+        // Sync each F## folder
+        for (const folder of folders) {
+            const folderPath = `${vfsMusicPath}/${folder}`;
+            let files;
+            try {
+                files = Module.FS.readdir(folderPath).filter(f => 
+                    f.endsWith('.mp3') || f.endsWith('.m4a') || 
+                    f.endsWith('.aac') || f.endsWith('.wav') || f.endsWith('.aiff')
+                );
+            } catch (e) {
+                continue;
+            }
+
+            if (files.length === 0) continue;
+
+            // Create folder on real iPod
+            const realFolderHandle = await musicHandle.getDirectoryHandle(folder, { create: true });
+
+            // Sync each file
+            for (const file of files) {
+                const filePath = `${folderPath}/${file}`;
+                try {
+                    // Check if file already exists on real iPod
+                    try {
+                        await realFolderHandle.getFileHandle(file);
+                        // File already exists, skip
+                        continue;
+                    } catch (e) {
+                        // File doesn't exist, copy it
+                    }
+
+                    // Read from virtual FS and write to real FS
+                    const fileData = Module.FS.readFile(filePath);
+                    const fileHandle = await realFolderHandle.getFileHandle(file, { create: true });
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(fileData);
+                    await writable.close();
+                    
+                    log(`Synced music file: ${folder}/${file}`, 'info');
+                } catch (e) {
+                    const errorMsg = e.message || e.toString() || 'Unknown error';
+                    log(`Could not sync ${folder}/${file}: ${errorMsg}`, 'warning');
+                }
+            }
+        }
+    } catch (e) {
+        const errorMsg = e.message || e.toString() || 'Unknown error';
+        log(`Error syncing music files: ${errorMsg}`, 'warning');
+    }
+}
+
+async function syncVirtualFileToReal(virtualPath, dirPath, fileName, optional = false) {
     try {
         // Check if file exists in virtual FS
         try {
             Module.FS.stat(virtualPath);
         } catch (e) {
-            log(`File not found in virtual FS: ${virtualPath}`, 'warning');
+            // Only log warning if file is required (not optional)
+            if (!optional) {
+                log(`File not found in virtual FS: ${virtualPath}`, 'warning');
+            }
             return;
         }
 
@@ -459,7 +510,10 @@ async function syncVirtualFileToReal(virtualPath, dirPath, fileName) {
         log(`Synced ${fileName} to iPod`, 'info');
     } catch (e) {
         const errorMsg = e.message || e.toString() || 'Unknown error';
-        log(`Failed to sync ${fileName}: ${errorMsg}`, 'warning');
+        // Only log warning if file is required (not optional)
+        if (!optional) {
+            log(`Failed to sync ${fileName}: ${errorMsg}`, 'warning');
+        }
     }
 }
 
@@ -589,8 +643,9 @@ async function uploadSingleTrack(file) {
     // Convert iPod path to filesystem path
     const fsPath = destPath.replace(/:/g, '/');
 
-    // Copy file to iPod
-    await copyFileToIpod(data, fsPath);
+    // Write file to virtual FS only (fast - just RAM)
+    // Real FS write happens later when user clicks "Save"
+    await copyFileToVirtualFS(data, fsPath);
 
     // Update track with path
     const pathPtr = wasmAllocString(destPath);
@@ -600,35 +655,19 @@ async function uploadSingleTrack(file) {
     log(`Uploaded: ${title} (ID: ${trackId})`, 'success');
 }
 
-async function copyFileToIpod(data, fsPath) {
-    if (!ipodHandle) {
-        throw new Error('iPod not connected');
-    }
-
-    // Parse path
-    const parts = fsPath.split('/').filter(p => p);
-
-    // Navigate/create directories
-    let currentDir = ipodHandle;
-    for (let i = 0; i < parts.length - 1; i++) {
-        currentDir = await currentDir.getDirectoryHandle(parts[i], { create: true });
-    }
-
-    // Write file
-    const fileName = parts[parts.length - 1];
-    const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(data);
-    await writable.close();
-
-    // Also write to virtual FS (use /iPod to match mountpoint)
+async function copyFileToVirtualFS(data, fsPath) {
+    // Write to virtual FS only (fast - just RAM)
+    // Real FS sync happens when user saves
     const virtualPath = '/iPod' + fsPath;
     try {
-        // Create directories
+        // Parse path and create directories
+        const parts = fsPath.split('/').filter(p => p);
         let dirPath = '/iPod';
         for (let i = 0; i < parts.length - 1; i++) {
             dirPath += '/' + parts[i];
-            try { Module.FS.mkdir(dirPath); } catch (e) {
+            try { 
+                Module.FS.mkdir(dirPath); 
+            } catch (e) {
                 // Directory might already exist
             }
         }
