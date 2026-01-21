@@ -106,6 +106,48 @@ function wasmFreeString(ptr) {
     if (ptr) Module._free(ptr);
 }
 
+/**
+ * Add a track via a typed call so strings are marshaled at the correct positions.
+ * Returns trackId (>=0) on success, <0 on error.
+ */
+function wasmAddTrack({
+    title,
+    artist,
+    album,
+    genre,
+    trackNr = 0,
+    cdNr = 0,
+    year = 0,
+    durationMs,
+    bitrateKbps,
+    samplerateHz,
+    sizeBytes,
+    filetype,
+}) {
+    if (!wasmReady || !Module?.ccall) return -1;
+
+    const safeTitle = title || '';
+    const safeArtist = artist || 'Unknown Artist';
+    const safeAlbum = album || 'Unknown Album';
+    const safeGenre = genre || '';
+    const safeFiletype = filetype || 'MPEG audio file';
+
+    const safeTrackNr = Number.isFinite(trackNr) ? trackNr : 0;
+    const safeCdNr = Number.isFinite(cdNr) ? cdNr : 0;
+    const safeYear = Number.isFinite(year) ? year : 0;
+    const safeDurationMs = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 180000;
+    const safeBitrate = Number.isFinite(bitrateKbps) && bitrateKbps > 0 ? bitrateKbps : 128;
+    const safeSamplerate = Number.isFinite(samplerateHz) && samplerateHz > 0 ? samplerateHz : 44100;
+    const safeSize = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 0;
+
+    return Module.ccall(
+        'ipod_add_track',
+        'number',
+        ['string','string','string','string','number','number','number','number','number','number','number','string'],
+        [safeTitle, safeArtist, safeAlbum, safeGenre, safeTrackNr, safeCdNr, safeYear, safeDurationMs, safeBitrate, safeSamplerate, safeSize, safeFiletype]
+    );
+}
+
 // ============================================================================
 // WASM Interface - Helper Functions (DRY)
 // ============================================================================
@@ -334,8 +376,6 @@ async function loadPlaylistTracks(index) {
 
 async function saveDatabase() {
     log('Saving database...');
-    await syncVirtualFSToIpod();
-
     const result = wasmCallWithError('ipod_write_db');
     if (result !== 0) return;
 
@@ -520,10 +560,20 @@ async function uploadSingleTrack(file) {
     const filetype = getFiletypeFromName(file.name);
 
     // Add track to database
-    const trackId = wasmCallWithStrings('ipod_add_track',
-        [tags.title, tags.artist, tags.album, tags.genre || '', filetype],
-        [tags.track || 0, 0, tags.year || 0, audioProps.duration, audioProps.bitrate, audioProps.samplerate, data.length]
-    );
+    const trackId = wasmAddTrack({
+        title: tags.title || file.name.replace(/\.[^/.]+$/, ''),
+        artist: tags.artist,
+        album: tags.album,
+        genre: tags.genre,
+        trackNr: tags.track || 0,
+        cdNr: 0,
+        year: tags.year || 0,
+        durationMs: audioProps.duration,
+        bitrateKbps: audioProps.bitrate,
+        samplerateHz: audioProps.samplerate,
+        sizeBytes: data.length,
+        filetype,
+    });
 
     if (trackId < 0) {
         const errorPtr = wasmCall('ipod_get_last_error');
@@ -563,7 +613,7 @@ async function uploadSingleTrack(file) {
         }
     }
 
-    log(`Uploaded: ${tags.title} (ID: ${trackId})`, 'success');
+    log(`Finalized: ${tags.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
 }
 
 function getFiletypeFromName(filename) {
@@ -631,24 +681,60 @@ function readAudioTags(file) {
 }
 
 async function getAudioProperties(file) {
-    return new Promise((resolve) => {
+    // IMPORTANT: Never return NaN/Infinity here.
+    // Emscripten will coerce NaN/Infinity to 0 for int args, which produces 0:00 durations on-device.
+    const DEFAULT = { duration: 180000, bitrate: 192, samplerate: 44100 }; // 3:00 fallback
+
+    // Fast path: HTMLAudioElement metadata (sometimes reports Infinity for some MP3s)
+    const meta = await new Promise((resolve) => {
         const audio = new Audio();
         audio.preload = 'metadata';
-        
+
+        const cleanup = () => {
+            try { if (audio.src) URL.revokeObjectURL(audio.src); } catch (_) {}
+            audio.removeAttribute('src');
+            try { audio.load(); } catch (_) {}
+        };
+
         audio.onloadedmetadata = () => {
-            const duration = Math.floor(audio.duration * 1000);
-            const bitrate = Math.floor((file.size * 8) / audio.duration / 1000);
-            URL.revokeObjectURL(audio.src);
-            resolve({ duration, bitrate: bitrate || 128, samplerate: 44100 });
+            const durationSec = audio.duration;
+            cleanup();
+            resolve({ durationSec });
         };
-        
+
         audio.onerror = () => {
-            URL.revokeObjectURL(audio.src);
-            resolve({ duration: 180000, bitrate: 192, samplerate: 44100 });
+            cleanup();
+            resolve({ durationSec: null });
         };
-        
+
         audio.src = URL.createObjectURL(file);
     });
+
+    let durationSec = meta.durationSec;
+
+    // Robust fallback: decode to get a real duration when metadata is missing/Infinity/NaN/0.
+    if (!Number.isFinite(durationSec) || durationSec <= 0) {
+        try {
+            const buf = await file.arrayBuffer();
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (Ctx) {
+                const ctx = new Ctx();
+                const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
+                durationSec = audioBuffer?.duration;
+                try { await ctx.close(); } catch (_) {}
+            }
+        } catch (_) {
+            // ignore; we'll fall back below
+        }
+    }
+
+    if (!Number.isFinite(durationSec) || durationSec <= 0) {
+        return DEFAULT;
+    }
+
+    const duration = Math.max(1, Math.floor(durationSec * 1000)); // ms; clamp to non-zero
+    const bitrate = Math.floor((file.size * 8) / durationSec / 1000);
+    return { duration, bitrate: Number.isFinite(bitrate) && bitrate > 0 ? bitrate : 128, samplerate: 44100 };
 }
 
 function updateUploadProgress(current, total, filename) {
@@ -763,20 +849,21 @@ function renderPlaylists(playlists) {
         </li>
     `;
 
+    // playlists is the canonical list from WASM; its indices are the indices we must use.
     html += playlists
-        .filter(pl => !pl.is_master)
-        .map((pl, displayIndex, filtered) => {
-            const actualIndex = playlists.indexOf(pl);
+        .map((pl, idx) => {
+            if (pl.is_master) return '';
             const icon = pl.is_podcast ? '🎙️' : pl.is_smart ? '⚡' : '📁';
             return `
-                <li class="playlist-item ${currentPlaylistIndex === actualIndex ? 'active' : ''}"
-                    data-playlist-index="${actualIndex}"
-                    onclick="selectPlaylist(${actualIndex})">
+                <li class="playlist-item ${currentPlaylistIndex === idx ? 'active' : ''}"
+                    data-playlist-index="${idx}"
+                    onclick="selectPlaylist(${idx})">
                     <span>${icon} ${escapeHtml(pl.name)}</span>
                     <span class="track-count">${pl.track_count}</span>
                 </li>
             `;
-        }).join('');
+        })
+        .join('');
 
     list.innerHTML = html;
     
