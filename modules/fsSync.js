@@ -137,77 +137,109 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         }
     }
 
-    async function syncVirtualFSToIpod(ipodHandle) {
-        if (!ipodHandle) return;
+    async function syncVirtualFSToIpod(ipodHandle, { onProgress } = {}) {
+        if (!ipodHandle) return { ok: false, errorCount: 1, syncedCount: 0, skippedCount: 0 };
         log('Syncing changes to iPod...');
-        try {
-            await syncVirtualFileToReal(ipodHandle, `${mountpoint}/iPod_Control/iTunes/iTunesDB`, ['iPod_Control', 'iTunes'], 'iTunesDB');
-            await syncVirtualFileToReal(ipodHandle, `${mountpoint}/iPod_Control/iTunes/iTunesSD`, ['iPod_Control', 'iTunes'], 'iTunesSD', true);
-            await syncMusicFilesToReal(ipodHandle);
-        } catch (e) {
-            log(`Sync error: ${e.message || e.toString() || 'Unknown error'}`, 'error');
-        }
-    }
 
-    async function syncMusicFilesToReal(ipodHandle) {
         const FS = getFS();
         if (!FS) throw new Error('WASM FS not ready');
 
-        let syncedCount = 0;
+        // Build a deterministic worklist for progress reporting.
+        const tasks = [];
+        tasks.push({ type: 'file', virtualPath: `${mountpoint}/iPod_Control/iTunes/iTunesDB`, dirPath: ['iPod_Control', 'iTunes'], fileName: 'iTunesDB', optional: false });
+        tasks.push({ type: 'file', virtualPath: `${mountpoint}/iPod_Control/iTunes/iTunesSD`, dirPath: ['iPod_Control', 'iTunes'], fileName: 'iTunesSD', optional: true });
 
+        // Scan music files in VFS (count all candidates; skips still advance progress)
+        const musicCandidates = [];
         try {
             const vfsMusicPath = `${mountpoint}/iPod_Control/Music`;
-            let folders;
-            try {
-                folders = FS.readdir(vfsMusicPath).filter(f => f.match(/^F\d{2}$/i));
-            } catch (_) {
-                return;
-            }
-            if (folders.length === 0) return;
-
-            const iPodControlHandle = await ipodHandle.getDirectoryHandle('iPod_Control', { create: true });
-            const musicHandle = await iPodControlHandle.getDirectoryHandle('Music', { create: true });
-
+            const folders = FS.readdir(vfsMusicPath).filter(f => f.match(/^F\d{2}$/i));
             for (const folder of folders) {
                 const folderPath = `${vfsMusicPath}/${folder}`;
-                let files;
+                let files = [];
                 try {
                     files = FS.readdir(folderPath).filter(f => /\.(mp3|m4a|aac|wav|aiff)$/i.test(f));
                 } catch (_) {
                     continue;
                 }
-                if (files.length === 0) continue;
-
-                const realFolderHandle = await musicHandle.getDirectoryHandle(folder, { create: true });
-
                 for (const file of files) {
-                    const filePath = `${folderPath}/${file}`;
-                    try {
-                        try {
-                            await realFolderHandle.getFileHandle(file);
-                            continue; // File already exists
-                        } catch (_) {}
-
-                        const fileData = FS.readFile(filePath);
-                        const fileHandle = await realFolderHandle.getFileHandle(file, { create: true });
-                        const writable = await fileHandle.createWritable();
-                        await writable.write(fileData);
-                        await writable.close();
-                        syncedCount++;
-                    } catch (e) {
-                        log(`Could not sync ${folder}/${file}: ${e.message}`, 'warning');
-                    }
+                    musicCandidates.push({ folder, file, filePath: `${folderPath}/${file}` });
                 }
             }
-            if (syncedCount > 0) {
-                log(`Synced ${syncedCount} music file${syncedCount > 1 ? 's' : ''} to iPod`, 'info');
-            }
-        } catch (e) {
-            log(`Error syncing music files: ${e.message}`, 'warning');
+        } catch (_) {
+            // ignore
         }
+
+        for (const m of musicCandidates) {
+            tasks.push({ type: 'music', ...m });
+        }
+
+        let done = 0;
+        const total = Math.max(1, tasks.length);
+        let errorCount = 0;
+        let syncedCount = 0;
+        let skippedCount = 0;
+
+        const report = (detail) => {
+            done += 1;
+            const percent = Math.round((done / total) * 100);
+            try {
+                onProgress?.({ phase: 'ipod', current: done, total, percent, detail });
+            } catch (_) {
+                // ignore callback errors
+            }
+        };
+
+        // Resolve real handles once
+        const iPodControlHandle = await ipodHandle.getDirectoryHandle('iPod_Control', { create: true });
+        const iTunesHandle = await iPodControlHandle.getDirectoryHandle('iTunes', { create: true });
+        const musicHandle = await iPodControlHandle.getDirectoryHandle('Music', { create: true });
+
+        for (const task of tasks) {
+            if (task.type === 'file') {
+                const ok = await syncVirtualFileToRealInternal(iTunesHandle, task.virtualPath, task.fileName, task.optional);
+                if (!ok && !task.optional) errorCount += 1;
+                if (ok) syncedCount += 1;
+                report(task.fileName);
+                continue;
+            }
+
+            // music file
+            const { folder, file, filePath } = task;
+            try {
+                const realFolderHandle = await musicHandle.getDirectoryHandle(folder, { create: true });
+                try {
+                    await realFolderHandle.getFileHandle(file);
+                    skippedCount += 1;
+                    report(`${folder}/${file} (already exists)`);
+                    continue;
+                } catch (_) {
+                    // does not exist, will copy
+                }
+
+                const fileData = FS.readFile(filePath);
+                const fileHandle = await realFolderHandle.getFileHandle(file, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(fileData);
+                await writable.close();
+                syncedCount += 1;
+                report(`${folder}/${file}`);
+            } catch (e) {
+                errorCount += 1;
+                log(`Could not sync ${folder}/${file}: ${e.message}`, 'warning');
+                report(`${folder}/${file} (error)`);
+            }
+        }
+
+        if (errorCount > 0) {
+            log(`Sync finished with ${errorCount} error${errorCount > 1 ? 's' : ''}`, 'warning');
+            return { ok: false, errorCount, syncedCount, skippedCount };
+        }
+
+        return { ok: true, errorCount: 0, syncedCount, skippedCount };
     }
 
-    async function syncVirtualFileToReal(ipodHandle, virtualPath, dirPath, fileName, optional = false) {
+    async function syncVirtualFileToRealInternal(realDirHandle, virtualPath, fileName, optional = false) {
         const FS = getFS();
         if (!FS) throw new Error('WASM FS not ready');
 
@@ -216,23 +248,28 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
                 FS.stat(virtualPath);
             } catch (_) {
                 if (!optional) log(`File not found in virtual FS: ${virtualPath}`, 'warning');
-                return;
+                return false;
             }
 
             const data = FS.readFile(virtualPath);
-            let currentDir = ipodHandle;
-            for (const dir of dirPath) {
-                currentDir = await currentDir.getDirectoryHandle(dir, { create: true });
-            }
-
-            const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
+            const fileHandle = await realDirHandle.getFileHandle(fileName, { create: true });
             const writable = await fileHandle.createWritable();
             await writable.write(data);
             await writable.close();
             log(`Synced ${fileName} to iPod`, 'info');
+            return true;
         } catch (e) {
             if (!optional) log(`Failed to sync ${fileName}: ${e.message}`, 'warning');
+            return false;
         }
+    }
+
+    async function syncVirtualFileToReal(ipodHandle, virtualPath, dirPath, fileName, optional = false) {
+        let currentDir = ipodHandle;
+        for (const dir of dirPath) {
+            currentDir = await currentDir.getDirectoryHandle(dir, { create: true });
+        }
+        await syncVirtualFileToRealInternal(currentDir, virtualPath, fileName, optional);
     }
 
     return {

@@ -13,6 +13,7 @@ export function createAppState(initialState = {}) {
         playlists: [],
         currentPlaylistIndex: -1, // -1 means "All Tracks"
         wasmReady: false,
+        pendingUploads: [], // queued files to be processed on sync
         ...initialState,
     };
 
@@ -69,5 +70,9 @@ export function createAppState(initialState = {}) {
         // WASM
         get wasmReady() { return state.wasmReady; },
         set wasmReady(v) { set('wasmReady', v); },
+
+        // Upload queue
+        get pendingUploads() { return state.pendingUploads; },
+        set pendingUploads(v) { set('pendingUploads', v); },
     };
 }

@@ -51,21 +51,34 @@ export function renderTracks({ tracks, escapeHtml }) {
     table.style.display = 'table';
     emptyState.style.display = 'none';
 
-    tbody.innerHTML = tracks.map((track, index) => `
-        <tr data-id="${track.id}" data-track-id="${track.id}">
-            <td>${index + 1}</td>
-            <td class="title">${escapeHtml(track.title || 'Unknown')}</td>
-            <td>${escapeHtml(track.artist || 'Unknown')}</td>
-            <td>${escapeHtml(track.album || 'Unknown')}</td>
-            <td>${escapeHtml(track.genre || '')}</td>
-            <td class="duration">${formatDuration(track.tracklen)}</td>
-            <td>
-                <button class="btn btn-secondary" onclick="deleteTrack(${track.id})" style="padding: 5px 10px; font-size: 0.8rem;">
+    tbody.innerHTML = tracks.map((track, index) => {
+        const isQueued = Boolean(track.__queued);
+        const title = escapeHtml(track.title || 'Unknown') + (isQueued ? ' *' : '');
+        const artist = escapeHtml(track.artist || (isQueued ? 'Queued' : 'Unknown'));
+        const album = escapeHtml(track.album || 'Unknown');
+        const genre = escapeHtml(track.genre || '');
+        const duration = isQueued ? '--:--' : formatDuration(track.tracklen);
+
+        const actionHtml = isQueued
+            ? `<button class="btn btn-secondary" onclick="removeQueuedTrack(${track._queueIndex})" style="padding: 6px 10px; font-size: 12px;">
+                    Remove
+               </button>`
+            : `<button class="btn btn-secondary" onclick="deleteTrack(${track.id})" style="padding: 6px 10px; font-size: 12px;">
                     Delete
-                </button>
-            </td>
-        </tr>
-    `).join('');
+               </button>`;
+
+        return `
+            <tr data-id="${escapeHtml(String(track.id))}" data-track-id="${escapeHtml(String(track.id))}">
+                <td>${index + 1}</td>
+                <td class="title">${title}</td>
+                <td>${artist}</td>
+                <td>${album}</td>
+                <td>${genre}</td>
+                <td class="duration">${duration}</td>
+                <td>${actionHtml}</td>
+            </tr>
+        `;
+    }).join('');
 }
 
 export function renderPlaylists({ playlists, currentPlaylistIndex, allTracksCount, escapeHtml }) {

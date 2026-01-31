@@ -42,8 +42,42 @@ async function loadTracks() {
     const tracks = wasm.wasmGetJson('ipod_get_all_tracks_json');
     if (tracks) {
         appState.tracks = tracks;
-        renderTracks({ tracks, escapeHtml });
+        renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+
+        // Ensure the sidebar "All Tracks" count reflects the latest track list,
+        // since refreshCurrentView() loads playlists before tracks.
+        renderPlaylists({
+            playlists: appState.playlists,
+            currentPlaylistIndex: appState.currentPlaylistIndex,
+            allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
+            escapeHtml,
+        });
     }
+}
+
+function getAllTracksWithQueued() {
+    const queued = (appState.pendingUploads || []).map((item, idx) => ({
+        id: `queued-${idx}`,
+        __queued: true,
+        _queueIndex: idx,
+        title: item.meta?.title || item.name || 'Queued track',
+        artist: item.meta?.artist || 'Queued',
+        album: item.meta?.album || '',
+        genre: item.meta?.genre || '',
+        tracklen: null,
+    }));
+    return [...(appState.tracks || []), ...queued];
+}
+
+function rerenderAllTracksIfVisible() {
+    if (appState.currentPlaylistIndex !== -1) return;
+    renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+    renderPlaylists({
+        playlists: appState.playlists,
+        currentPlaylistIndex: appState.currentPlaylistIndex,
+        allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
+        escapeHtml,
+    });
 }
 
 async function loadPlaylists() {
@@ -54,7 +88,7 @@ async function loadPlaylists() {
         renderPlaylists({
             playlists,
             currentPlaylistIndex: appState.currentPlaylistIndex,
-            allTracksCount: appState.tracks.length,
+            allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
             escapeHtml,
         });
     }
@@ -96,13 +130,140 @@ async function refreshTracks() {
     log('Refreshed track list', 'info');
 }
 
+function setUploadModalState({ title, status, detail, percent, showOk, okLabel } = {}) {
+    const titleEl = document.getElementById('uploadTitle');
+    const statusEl = document.getElementById('uploadStatus');
+    const detailEl = document.getElementById('uploadDetail');
+    const barEl = document.getElementById('uploadProgress');
+    const actionsEl = document.getElementById('uploadActions');
+    const okBtn = document.getElementById('uploadOkBtn');
+
+    if (titleEl && typeof title === 'string') titleEl.textContent = title;
+    if (statusEl && typeof status === 'string') statusEl.textContent = status;
+    if (detailEl && typeof detail === 'string') detailEl.textContent = detail;
+    if (barEl && Number.isFinite(percent)) barEl.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+
+    if (actionsEl) actionsEl.style.display = showOk ? 'flex' : 'none';
+    if (okBtn && typeof okLabel === 'string') okBtn.textContent = okLabel;
+}
+
+function dismissUploadModal() {
+    // Reset modal back to default state
+    setUploadModalState({
+        title: 'Uploading',
+        status: 'Preparing...',
+        detail: '',
+        percent: 0,
+        showOk: false,
+        okLabel: 'OK',
+    });
+    modals.hideUpload();
+}
+
 async function saveDatabase() {
-    log('Saving database...');
+    if (!appState.isConnected) {
+        log('Please connect an iPod first', 'warning');
+        return;
+    }
+
+    // Always show the modal for the full sync (staging + iPod upload)
+    modals.showUpload();
+    setUploadModalState({
+        title: 'Uploading',
+        status: 'Preparing...',
+        detail: '',
+        percent: 0,
+        showOk: false,
+    });
+
+    // 1) Process queued uploads (read bytes -> write into WASM FS + add tracks)
+    const queue = appState.pendingUploads || [];
+    const toStage = queue.filter((q) => q.status !== 'staged');
+    if (toStage.length > 0) {
+        log(`Staging ${toStage.length} queued track(s)...`, 'info');
+        setUploadModalState({ status: `Uploading... (${toStage.length} track${toStage.length !== 1 ? 's' : ''})` });
+
+        for (let i = 0; i < toStage.length; i++) {
+            const item = toStage[i];
+            const file = item.kind === 'handle' ? await item.handle.getFile() : item.file;
+            updateUploadProgress(i + 1, toStage.length, file?.name || item.name || 'Unknown');
+            const ok = await uploadSingleTrack(file);
+            if (ok) item.status = 'staged';
+        }
+
+        // Keep pending uploads until the FULL sync finishes successfully
+        appState.pendingUploads = [...queue];
+        rerenderAllTracksIfVisible();
+    }
+
+    // 2) Write iTunesDB (hash/checksum generation)
+    log('Syncing iPod database...', 'info');
+    setUploadModalState({ status: 'Preparing database...', detail: '' });
     const result = wasm.wasmCallWithError('ipod_write_db');
-    if (result !== 0) return;
-    await fsSync.syncVirtualFSToIpod(appState.ipodHandle);
+    if (result !== 0) {
+        setUploadModalState({
+            title: 'Upload failed',
+            status: 'Failed to prepare database.',
+            detail: 'Please check the console log for details.',
+            showOk: true,
+            okLabel: 'OK',
+        });
+        return;
+    }
+
+    // 3) Copy iTunesDB + music files from WASM FS -> real iPod filesystem
+    try {
+        setUploadModalState({ status: 'Uploading to iPod...', detail: '', percent: 0 });
+        const res = await fsSync.syncVirtualFSToIpod(appState.ipodHandle, {
+            onProgress: ({ percent, detail }) => {
+                setUploadModalState({
+                    title: 'Uploading to iPod...',
+                    status: 'Uploading to iPod...',
+                    detail: detail || '',
+                    percent,
+                    showOk: false,
+                });
+            }
+        });
+
+        if (!res?.ok) {
+            setUploadModalState({
+                title: 'Upload finished with errors',
+                status: 'Some files could not be uploaded.',
+                detail: 'Please check the console log for details.',
+                percent: 100,
+                showOk: true,
+                okLabel: 'OK',
+            });
+            return;
+        }
+    } catch (e) {
+        log(`Sync failed: ${e?.message || e}`, 'error');
+        setUploadModalState({
+            title: 'Upload failed',
+            status: 'Uploading to iPod failed.',
+            detail: 'Please check the console log for details.',
+            showOk: true,
+            okLabel: 'OK',
+        });
+        return;
+    }
+
+    // Clear queue only after successful iPod sync so the '*' goes away
+    appState.pendingUploads = [];
+
+    // 4) Refresh UI
     await refreshCurrentView();
-    log('Database saved successfully', 'success');
+    log('Sync complete', 'success');
+
+    setUploadModalState({
+        title: 'Done uploading!',
+        status: 'Done uploading! Safe to disconnect.',
+        detail: '',
+        percent: 100,
+        showOk: true,
+        okLabel: 'OK',
+    });
 }
 
 // === Connect / FS ===
@@ -303,12 +464,76 @@ async function removeTrackFromPlaylist(trackId) {
 // === Upload ===
 function updateUploadProgress(current, total, filename) {
     const percent = Math.round((current / total) * 100);
-    const bar = document.getElementById('uploadProgress');
-    const status = document.getElementById('uploadStatus');
-    const detail = document.getElementById('uploadDetail');
-    if (bar) bar.style.width = `${percent}%`;
-    if (status) status.textContent = `Uploading ${current} of ${total}`;
-    if (detail) detail.textContent = filename;
+    setUploadModalState({
+        title: 'Uploading...',
+        status: `Uploading... ${current} of ${total}`,
+        detail: filename,
+        percent,
+        showOk: false,
+    });
+}
+
+function queueFileHandlesForSync(fileHandles) {
+    const queued = (fileHandles || []).map((handle) => ({
+        kind: 'handle',
+        handle,
+        name: handle?.name || 'Unknown',
+        status: 'queued',
+        meta: null,
+    }));
+    appState.pendingUploads = [...(appState.pendingUploads || []), ...queued];
+    log(`Queued ${queued.length} track(s). Click “Sync iPod” to transfer.`, 'success');
+    rerenderAllTracksIfVisible();
+
+    // Best-effort metadata read (fast; does not stage audio into WASM FS)
+    void (async () => {
+        for (const item of queued) {
+            try {
+                const file = await item.handle.getFile();
+                const tags = await readAudioTags(file);
+                item.meta = { title: tags.title, artist: tags.artist, album: tags.album, genre: tags.genre };
+            } catch (_) {
+                // ignore
+            }
+        }
+        appState.pendingUploads = [...(appState.pendingUploads || [])];
+        rerenderAllTracksIfVisible();
+    })();
+}
+
+function queueFilesForSync(files) {
+    const queued = (files || []).map((file) => ({
+        kind: 'file',
+        file,
+        name: file?.name || 'Unknown',
+        status: 'queued',
+        meta: null,
+    }));
+    appState.pendingUploads = [...(appState.pendingUploads || []), ...queued];
+    log(`Queued ${queued.length} track(s). Click “Sync iPod” to transfer.`, 'success');
+    rerenderAllTracksIfVisible();
+
+    void (async () => {
+        for (const item of queued) {
+            try {
+                const tags = await readAudioTags(item.file);
+                item.meta = { title: tags.title, artist: tags.artist, album: tags.album, genre: tags.genre };
+            } catch (_) {
+                // ignore
+            }
+        }
+        appState.pendingUploads = [...(appState.pendingUploads || [])];
+        rerenderAllTracksIfVisible();
+    })();
+}
+
+function removeQueuedTrack(queueIndex) {
+    const q = [...(appState.pendingUploads || [])];
+    if (queueIndex < 0 || queueIndex >= q.length) return;
+    q.splice(queueIndex, 1);
+    appState.pendingUploads = q;
+    rerenderAllTracksIfVisible();
+    log('Removed queued track', 'info');
 }
 
 async function uploadTracks() {
@@ -322,26 +547,14 @@ async function uploadTracks() {
         });
 
         if (fileHandles.length === 0) return;
-        log(`Selected ${fileHandles.length} files for upload`, 'info');
-
-        modals.showUpload();
-
-        for (let i = 0; i < fileHandles.length; i++) {
-            const file = await fileHandles[i].getFile();
-            updateUploadProgress(i + 1, fileHandles.length, file.name);
-            await uploadSingleTrack(file);
-        }
-
-        modals.hideUpload();
-        await refreshCurrentView();
-        log(`Upload complete: ${fileHandles.length} tracks`, 'success');
+        queueFileHandlesForSync(fileHandles);
     } catch (e) {
-        modals.hideUpload();
         if (e.name !== 'AbortError') log(`Upload error: ${e.message}`, 'error');
     }
 }
 
 async function uploadSingleTrack(file) {
+    if (!file) return false;
     const tags = await readAudioTags(file);
     const audioProps = await getAudioProperties(file);
     const buffer = await file.arrayBuffer();
@@ -367,20 +580,20 @@ async function uploadSingleTrack(file) {
     if (trackIndex < 0) {
         const errorPtr = wasm.wasmCall('ipod_get_last_error');
         log(`Failed to add track: ${wasm.wasmGetString(errorPtr)}`, 'error');
-        return;
+        return false;
     }
 
     const destPathPtr = wasm.wasmCallWithStrings('ipod_get_track_dest_path', [file.name]);
     if (!destPathPtr) {
         log('Failed to get destination path', 'error');
-        return;
+        return false;
     }
 
     const destPath = wasm.wasmGetString(destPathPtr);
     wasm.wasmCall('ipod_free_string', destPathPtr);
     if (!destPath) {
         log('Failed to read destination path', 'error');
-        return;
+        return false;
     }
 
     await fsSync.copyFileToVirtualFS(data, destPath);
@@ -401,6 +614,7 @@ async function uploadSingleTrack(file) {
     }
 
     log(`Added: ${tags.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
+    return true;
 }
 
 // === Search / playlist selection ===
@@ -409,11 +623,11 @@ function selectPlaylist(index) {
     renderPlaylists({
         playlists: appState.playlists,
         currentPlaylistIndex: index,
-        allTracksCount: appState.tracks.length,
+        allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
         escapeHtml,
     });
     if (index === -1) {
-        renderTracks({ tracks: appState.tracks, escapeHtml });
+        renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
     } else {
         loadPlaylistTracks(index);
     }
@@ -423,12 +637,13 @@ function filterTracks() {
     const query = (document.getElementById('searchBox')?.value || '').toLowerCase();
     const idx = appState.currentPlaylistIndex;
     if (!query) {
-        if (idx === -1) renderTracks({ tracks: appState.tracks, escapeHtml });
+        if (idx === -1) renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
         else loadPlaylistTracks(idx);
         return;
     }
 
-    const filtered = appState.tracks.filter(track =>
+    const base = idx === -1 ? getAllTracksWithQueued() : (appState.tracks || []);
+    const filtered = base.filter(track =>
         (track.title && track.title.toLowerCase().includes(query)) ||
         (track.artist && track.artist.toLowerCase().includes(query)) ||
         (track.album && track.album.toLowerCase().includes(query))
@@ -469,16 +684,7 @@ function initDragAndDrop() {
             return;
         }
 
-        log(`Dropped ${files.length} files`, 'info');
-        modals.showUpload();
-
-        for (let i = 0; i < files.length; i++) {
-            updateUploadProgress(i + 1, files.length, files[i].name);
-            await uploadSingleTrack(files[i]);
-        }
-
-        modals.hideUpload();
-        await refreshCurrentView();
+        queueFilesForSync(files);
     });
 }
 
@@ -516,6 +722,8 @@ Object.assign(window, {
     dismissWelcome,
     hideBrowserCompatModal,
     hideIpodNotDetectedModal,
+    removeQueuedTrack,
+    dismissUploadModal,
 });
 
 // === Initialization ===

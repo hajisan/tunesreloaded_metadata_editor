@@ -741,7 +741,8 @@
             <h1>TunesReloaded</h1>
             <p>
                 TunesReloaded is a platform that allows you to sync music with your 
-                iPod Classic without needing to use iTunes. Connect your iPod to get started!
+                iPod Classic without needing to use iTunes. 
+                Connect your iPod to get started!
             </p>
             <button class="btn btn-primary" onclick="dismissWelcome()">
                 Get Started
@@ -795,7 +796,7 @@
                     <div class="toolbar">
                         <input type="text" class="search-box" id="searchBox" placeholder="Search..." oninput="filterTracks()">
                         <button class="btn btn-primary" id="uploadBtn" onclick="uploadTracks()" disabled>Upload</button>
-                        <button class="btn btn-secondary" id="saveBtn" onclick="saveDatabase()" disabled>Sync to iPod</button>
+                        <button class="btn btn-secondary" id="saveBtn" onclick="saveDatabase()" disabled>Sync iPod</button>
                         <button class="btn btn-secondary" id="refreshBtn" onclick="refreshTracks()" disabled>Refresh</button>
                     </div>
 
@@ -856,12 +857,17 @@
     <!-- Upload Progress Modal -->
     <div class="modal-overlay" id="uploadModal">
         <div class="modal">
-            <h2>Uploading</h2>
+            <h2 id="uploadTitle">Uploading</h2>
             <p id="uploadStatus">Preparing...</p>
             <div class="progress-bar">
                 <div class="fill" id="uploadProgress" style="width: 0%"></div>
             </div>
             <p id="uploadDetail" style="margin-top: 12px; font-size: 12px; color: var(--text-mid);"></p>
+            <div class="modal-actions" id="uploadActions" style="justify-content: center; display: none;">
+                <button class="btn btn-primary" id="uploadOkBtn" onclick="dismissUploadModal()">
+                    OK
+                </button>
+            </div>
         </div>
     </div>
 
