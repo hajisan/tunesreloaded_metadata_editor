@@ -3,6 +3,8 @@ import { createWasmApi } from './modules/wasmApi.js';
 import { createFsSync } from './modules/fsSync.js';
 import { createContextMenu } from './modules/contextMenu.js';
 import { createFirewireSetup } from './modules/firewireSetup.js';
+import { createModalManager } from './modules/modalManager.js';
+import { createAppState } from './modules/state.js';
 import { readAudioTags, getAudioProperties, getFiletypeFromName, isAudioFile } from './modules/audio.js';
 import { renderTracks, renderPlaylists, formatDuration, updateConnectionStatus, enableUIIfReady } from './modules/uiRender.js';
 
@@ -11,16 +13,15 @@ import { renderTracks, renderPlaylists, formatDuration, updateConnectionStatus, 
  * Keeps existing UI behavior while making the codebase modular.
  */
 
-let ipodHandle = null;
-let isConnected = false;
-let allTracks = [];
-let allPlaylists = [];
-let currentPlaylistIndex = -1; // -1 means "All Tracks"
+// Centralized state
+const appState = createAppState();
 
+// Module instances
 const { log, toggleLogPanel, escapeHtml } = createLogger();
 const wasm = createWasmApi({ log });
 const fsSync = createFsSync({ log, wasm, mountpoint: '/iPod' });
 const firewireSetup = createFirewireSetup({ log });
+const modals = createModalManager();
 
 // === Database / view refresh ===
 async function parseDatabase() {
@@ -28,9 +29,9 @@ async function parseDatabase() {
     const result = wasm.wasmCallWithError('ipod_parse_db');
     if (result !== 0) return;
 
-    isConnected = true;
+    appState.isConnected = true;
     updateConnectionStatus(true);
-    enableUIIfReady({ wasmReady: wasm.isReady(), isConnected });
+    enableUIIfReady({ wasmReady: appState.wasmReady, isConnected: appState.isConnected });
 
     await refreshCurrentView();
     log('Database loaded successfully', 'success');
@@ -40,7 +41,7 @@ async function loadTracks() {
     log('Loading tracks...');
     const tracks = wasm.wasmGetJson('ipod_get_all_tracks_json');
     if (tracks) {
-        allTracks = tracks;
+        appState.tracks = tracks;
         renderTracks({ tracks, escapeHtml });
     }
 }
@@ -49,23 +50,23 @@ async function loadPlaylists() {
     log('Loading playlists...');
     const playlists = wasm.wasmGetJson('ipod_get_all_playlists_json');
     if (playlists) {
-        allPlaylists = playlists;
+        appState.playlists = playlists;
         renderPlaylists({
             playlists,
-            currentPlaylistIndex,
-            allTracksCount: allTracks.length,
+            currentPlaylistIndex: appState.currentPlaylistIndex,
+            allTracksCount: appState.tracks.length,
             escapeHtml,
         });
     }
 }
 
 async function loadPlaylistTracks(index) {
-    if (index < 0 || index >= allPlaylists.length) {
+    if (index < 0 || index >= appState.playlists.length) {
         log(`Invalid playlist index: ${index}`, 'error');
         return;
     }
 
-    const playlistName = allPlaylists[index].name;
+    const playlistName = appState.playlists[index].name;
     log(`Loading tracks for playlist: "${playlistName}"`, 'info');
 
     const tracks = wasm.wasmGetJson('ipod_get_playlist_tracks_json', index);
@@ -76,20 +77,21 @@ async function loadPlaylistTracks(index) {
 
 async function refreshCurrentView() {
     await loadPlaylists();
-    if (currentPlaylistIndex === -1) {
+    const idx = appState.currentPlaylistIndex;
+    if (idx === -1) {
         await loadTracks();
-    } else if (currentPlaylistIndex >= 0 && currentPlaylistIndex < allPlaylists.length) {
-        await loadPlaylistTracks(currentPlaylistIndex);
+    } else if (idx >= 0 && idx < appState.playlists.length) {
+        await loadPlaylistTracks(idx);
     } else {
-        currentPlaylistIndex = -1;
+        appState.currentPlaylistIndex = -1;
         await loadTracks();
     }
 }
 
 async function refreshTracks() {
-    const saved = currentPlaylistIndex;
+    const saved = appState.currentPlaylistIndex;
     await loadPlaylists();
-    currentPlaylistIndex = saved;
+    appState.currentPlaylistIndex = saved;
     await refreshCurrentView();
     log('Refreshed track list', 'info');
 }
@@ -98,7 +100,7 @@ async function saveDatabase() {
     log('Saving database...');
     const result = wasm.wasmCallWithError('ipod_write_db');
     if (result !== 0) return;
-    await fsSync.syncVirtualFSToIpod(ipodHandle);
+    await fsSync.syncVirtualFSToIpod(appState.ipodHandle);
     await refreshCurrentView();
     log('Database saved successfully', 'success');
 }
@@ -108,7 +110,7 @@ async function selectIpodFolder() {
     try {
         log('Opening folder picker...');
         const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        ipodHandle = handle;
+        appState.ipodHandle = handle;
         log(`Selected folder: ${handle.name}`, 'success');
 
         const isValid = await fsSync.verifyIpodStructure(handle);
@@ -121,7 +123,7 @@ async function selectIpodFolder() {
         const hasFirewireGuid = await firewireSetup.checkFirewireGuid(handle);
         if (!hasFirewireGuid) {
             log('FirewireGuid not found - iPod Classic may need setup', 'warning');
-            firewireSetup.showModal();
+            modals.showFirewireSetup();
             return; // Wait for user to complete setup
         }
 
@@ -136,16 +138,16 @@ async function selectIpodFolder() {
 }
 
 async function continueIpodConnection() {
-    if (!ipodHandle) return;
-    await fsSync.setupWasmFilesystem(ipodHandle);
+    if (!appState.ipodHandle) return;
+    await fsSync.setupWasmFilesystem(appState.ipodHandle);
     await parseDatabase();
 }
 
 // === FirewireGuid Setup (for iPod Classic 6G+) ===
 async function setupFirewireGuid() {
     try {
-        await firewireSetup.performSetup(ipodHandle);
-        firewireSetup.hideModal();
+        await firewireSetup.performSetup(appState.ipodHandle);
+        modals.hideFirewireSetup();
         log('FirewireGuid setup complete!', 'success');
         await continueIpodConnection();
     } catch (e) {
@@ -158,14 +160,14 @@ async function setupFirewireGuid() {
 }
 
 async function skipFirewireSetup() {
-    firewireSetup.hideModal();
+    modals.hideFirewireSetup();
     log('Skipping FirewireGuid setup - songs may not appear on iPod', 'warning');
     await continueIpodConnection();
 }
 
 // === Playlist modal ===
 function showNewPlaylistModal() {
-    document.getElementById('newPlaylistModal')?.classList.add('show');
+    modals.showNewPlaylist();
     const input = document.getElementById('playlistName');
     if (input) {
         input.value = '';
@@ -174,7 +176,7 @@ function showNewPlaylistModal() {
 }
 
 function hideNewPlaylistModal() {
-    document.getElementById('newPlaylistModal')?.classList.remove('show');
+    modals.hideNewPlaylist();
 }
 
 function createPlaylist() {
@@ -197,11 +199,12 @@ function createPlaylist() {
 }
 
 async function deletePlaylist(playlistIndex) {
-    if (playlistIndex < 0 || playlistIndex >= allPlaylists.length) {
+    const playlists = appState.playlists;
+    if (playlistIndex < 0 || playlistIndex >= playlists.length) {
         log('Invalid playlist index', 'error');
         return;
     }
-    const playlist = allPlaylists[playlistIndex];
+    const playlist = playlists[playlistIndex];
     if (playlist.is_master) {
         log('Cannot delete master playlist', 'warning');
         return;
@@ -211,7 +214,9 @@ async function deletePlaylist(playlistIndex) {
     const result = wasm.wasmCallWithError('ipod_delete_playlist', playlistIndex);
     if (result !== 0) return;
 
-    if (currentPlaylistIndex === playlistIndex) currentPlaylistIndex = -1;
+    if (appState.currentPlaylistIndex === playlistIndex) {
+        appState.currentPlaylistIndex = -1;
+    }
     await refreshCurrentView();
     log(`Deleted playlist: ${playlist.name}`, 'success');
 }
@@ -226,11 +231,12 @@ async function deleteTrack(trackId) {
 }
 
 async function addTrackToPlaylist(trackId, playlistIndex) {
-    if (playlistIndex < 0 || playlistIndex >= allPlaylists.length) {
+    const playlists = appState.playlists;
+    if (playlistIndex < 0 || playlistIndex >= playlists.length) {
         log('Invalid playlist index', 'error');
         return;
     }
-    const playlist = allPlaylists[playlistIndex];
+    const playlist = playlists[playlistIndex];
     if (playlist.is_master) {
         log('Cannot add tracks to master playlist directly', 'warning');
         return;
@@ -247,18 +253,20 @@ async function addTrackToPlaylist(trackId, playlistIndex) {
 }
 
 async function removeTrackFromPlaylist(trackId) {
-    if (currentPlaylistIndex < 0 || currentPlaylistIndex >= allPlaylists.length) {
+    const idx = appState.currentPlaylistIndex;
+    const playlists = appState.playlists;
+    if (idx < 0 || idx >= playlists.length) {
         log('No playlist selected', 'warning');
         return;
     }
-    const playlist = allPlaylists[currentPlaylistIndex];
+    const playlist = playlists[idx];
     if (playlist.is_master) {
         log('Cannot remove tracks from master playlist', 'warning');
         return;
     }
     if (!confirm(`Remove this track from "${playlist.name}"?`)) return;
 
-    const result = wasm.wasmCall('ipod_playlist_remove_track', currentPlaylistIndex, trackId);
+    const result = wasm.wasmCall('ipod_playlist_remove_track', idx, trackId);
     if (result !== 0) {
         const errorPtr = wasm.wasmCall('ipod_get_last_error');
         log(`Failed to remove track: ${wasm.wasmGetString(errorPtr)}`, 'error');
@@ -293,7 +301,7 @@ async function uploadTracks() {
         if (fileHandles.length === 0) return;
         log(`Selected ${fileHandles.length} files for upload`, 'info');
 
-        document.getElementById('uploadModal')?.classList.add('show');
+        modals.showUpload();
 
         for (let i = 0; i < fileHandles.length; i++) {
             const file = await fileHandles[i].getFile();
@@ -301,11 +309,11 @@ async function uploadTracks() {
             await uploadSingleTrack(file);
         }
 
-        document.getElementById('uploadModal')?.classList.remove('show');
+        modals.hideUpload();
         await refreshCurrentView();
         log(`Upload complete: ${fileHandles.length} tracks`, 'success');
     } catch (e) {
-        document.getElementById('uploadModal')?.classList.remove('show');
+        modals.hideUpload();
         if (e.name !== 'AbortError') log(`Upload error: ${e.message}`, 'error');
     }
 }
@@ -364,8 +372,9 @@ async function uploadSingleTrack(file) {
         wasm.wasmCallWithStrings('ipod_track_set_path', [ipodPath], [trackIndex]);
     }
 
-    if (currentPlaylistIndex >= 0 && currentPlaylistIndex < allPlaylists.length) {
-        wasm.wasmCall('ipod_playlist_add_track', currentPlaylistIndex, trackIndex);
+    const idx = appState.currentPlaylistIndex;
+    if (idx >= 0 && idx < appState.playlists.length) {
+        wasm.wasmCall('ipod_playlist_add_track', idx, trackIndex);
     }
 
     log(`Added: ${tags.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
@@ -373,15 +382,15 @@ async function uploadSingleTrack(file) {
 
 // === Search / playlist selection ===
 function selectPlaylist(index) {
-    currentPlaylistIndex = index;
+    appState.currentPlaylistIndex = index;
     renderPlaylists({
-        playlists: allPlaylists,
-        currentPlaylistIndex,
-        allTracksCount: allTracks.length,
+        playlists: appState.playlists,
+        currentPlaylistIndex: index,
+        allTracksCount: appState.tracks.length,
         escapeHtml,
     });
     if (index === -1) {
-        renderTracks({ tracks: allTracks, escapeHtml });
+        renderTracks({ tracks: appState.tracks, escapeHtml });
     } else {
         loadPlaylistTracks(index);
     }
@@ -389,13 +398,14 @@ function selectPlaylist(index) {
 
 function filterTracks() {
     const query = (document.getElementById('searchBox')?.value || '').toLowerCase();
+    const idx = appState.currentPlaylistIndex;
     if (!query) {
-        if (currentPlaylistIndex === -1) renderTracks({ tracks: allTracks, escapeHtml });
-        else loadPlaylistTracks(currentPlaylistIndex);
+        if (idx === -1) renderTracks({ tracks: appState.tracks, escapeHtml });
+        else loadPlaylistTracks(idx);
         return;
     }
 
-    const filtered = allTracks.filter(track =>
+    const filtered = appState.tracks.filter(track =>
         (track.title && track.title.toLowerCase().includes(query)) ||
         (track.artist && track.artist.toLowerCase().includes(query)) ||
         (track.album && track.album.toLowerCase().includes(query))
@@ -421,7 +431,7 @@ function initDragAndDrop() {
         e.preventDefault();
         dropZone.classList.remove('dragover');
 
-        if (!isConnected) {
+        if (!appState.isConnected) {
             log('Please connect an iPod first', 'warning');
             return;
         }
@@ -437,14 +447,14 @@ function initDragAndDrop() {
         }
 
         log(`Dropped ${files.length} files`, 'info');
-        document.getElementById('uploadModal')?.classList.add('show');
+        modals.showUpload();
 
         for (let i = 0; i < files.length; i++) {
             updateUploadProgress(i + 1, files.length, files[i].name);
             await uploadSingleTrack(files[i]);
         }
 
-        document.getElementById('uploadModal')?.classList.remove('show');
+        modals.hideUpload();
         await refreshCurrentView();
     });
 }
@@ -452,8 +462,8 @@ function initDragAndDrop() {
 // === Context menus ===
 const contextMenu = createContextMenu({
     log,
-    getAllPlaylists: () => allPlaylists,
-    getCurrentPlaylistIndex: () => currentPlaylistIndex,
+    getAllPlaylists: () => appState.playlists,
+    getCurrentPlaylistIndex: () => appState.currentPlaylistIndex,
     actions: {
         deletePlaylist,
         deleteTrack,
@@ -498,13 +508,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     contextMenu.attachTrackContextMenus();
 
     const ok = await wasm.initWasm();
-    enableUIIfReady({ wasmReady: ok, isConnected });
+    appState.wasmReady = ok;
+    enableUIIfReady({ wasmReady: ok, isConnected: appState.isConnected });
 });
 
 document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        if (isConnected) saveDatabase();
+        if (appState.isConnected) saveDatabase();
     }
 });
 
