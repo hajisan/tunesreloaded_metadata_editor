@@ -115,7 +115,8 @@ async function selectIpodFolder() {
 
         const isValid = await fsSync.verifyIpodStructure(handle);
         if (!isValid) {
-            log('This folder does not look like an iPod root. Please select the iPod volume root (must contain iPod_Control/iTunes/iTunesDB).', 'error');
+            log('This folder does not look like an iPod root.', 'error');
+            modals.showIpodNotDetected();
             return;
         }
 
@@ -181,6 +182,10 @@ function dismissWelcome() {
 
 function hideBrowserCompatModal() {
     modals.hideBrowserCompat();
+}
+
+function hideIpodNotDetectedModal() {
+    modals.hideIpodNotDetected();
 }
 
 // === Playlist modal ===
@@ -510,6 +515,7 @@ Object.assign(window, {
     skipFirewireSetup,
     dismissWelcome,
     hideBrowserCompatModal,
+    hideIpodNotDetectedModal,
 });
 
 // === Initialization ===

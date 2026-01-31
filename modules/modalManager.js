@@ -22,6 +22,7 @@ export function createModalManager() {
         firewireSetup: 'firewireSetupModal',
         welcome: 'welcomeOverlay',
         browserCompat: 'browserCompatModal',
+        ipodNotDetected: 'ipodNotDetectedModal',
     };
 
     // Welcome overlay uses 'hidden' class instead of 'show'
@@ -48,5 +49,7 @@ export function createModalManager() {
         hideWelcome,
         showBrowserCompat: () => show(modals.browserCompat),
         hideBrowserCompat: () => hide(modals.browserCompat),
+        showIpodNotDetected: () => show(modals.ipodNotDetected),
+        hideIpodNotDetected: () => hide(modals.ipodNotDetected),
     };
 }

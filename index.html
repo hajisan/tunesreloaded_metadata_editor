@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TunesReloaded - iPod Manager</title>
+    <title>TunesReloaded</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Lucida+Grande:wght@400;700&display=swap" rel="stylesheet">
@@ -754,7 +754,7 @@
         <header class="header-banner">
             <div class="header-left">
                 <h1 class="app-title">TunesReloaded</h1>
-                <p class="app-tagline">your iPod, reconnected</p>
+                <p class="app-tagline">your iconic ipod, for the modern age</p>
             </div>
             <div class="header-right">
                 <div class="status-badge">
@@ -795,7 +795,7 @@
                     <div class="toolbar">
                         <input type="text" class="search-box" id="searchBox" placeholder="Search..." oninput="filterTracks()">
                         <button class="btn btn-primary" id="uploadBtn" onclick="uploadTracks()" disabled>Upload</button>
-                        <button class="btn btn-secondary" id="saveBtn" onclick="saveDatabase()" disabled>Save</button>
+                        <button class="btn btn-secondary" id="saveBtn" onclick="saveDatabase()" disabled>Sync to iPod</button>
                         <button class="btn btn-secondary" id="refreshBtn" onclick="refreshTracks()" disabled>Refresh</button>
                     </div>
 
@@ -865,6 +865,23 @@
         </div>
     </div>
 
+    <!-- iPod Not Detected Modal -->
+    <div class="modal-overlay" id="ipodNotDetectedModal">
+        <div class="modal">
+            <h2>iPod Not Detected</h2>
+            <p style="margin-bottom: 20px;">
+                An iPod was not detected. Please note we currently only support classic, non-touch 
+                iPod models (with the 30-pin port), and your iPod should have been set up with 
+                iTunes at least once!
+            </p>
+            <div class="modal-actions" style="justify-content: center;">
+                <button class="btn btn-primary" onclick="hideIpodNotDetectedModal()">
+                    OK
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Browser Compatibility Modal -->
     <div class="modal-overlay" id="browserCompatModal">
         <div class="modal">
@@ -890,6 +907,7 @@
             </p>
             <p style="margin-bottom: 20px; font-size: 12px;">
                 Click the button below and select your iPod from the popup.
+                (this will only take a few seconds)
             </p>
             <div class="modal-actions" style="justify-content: center;">
                 <button class="btn btn-primary" onclick="setupFirewireGuid()">
