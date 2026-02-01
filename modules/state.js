@@ -14,6 +14,7 @@ export function createAppState(initialState = {}) {
         currentPlaylistIndex: -1, // -1 means "All Tracks"
         wasmReady: false,
         pendingUploads: [], // queued files to be processed on sync
+        pendingFileDeletes: [], // relative FS paths to delete on next sync
         ...initialState,
     };
 
@@ -74,5 +75,9 @@ export function createAppState(initialState = {}) {
         // Upload queue
         get pendingUploads() { return state.pendingUploads; },
         set pendingUploads(v) { set('pendingUploads', v); },
+
+        // Deferred file deletions
+        get pendingFileDeletes() { return state.pendingFileDeletes; },
+        set pendingFileDeletes(v) { set('pendingFileDeletes', v); },
     };
 }

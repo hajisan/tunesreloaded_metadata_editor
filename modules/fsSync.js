@@ -186,26 +186,30 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
         const writable = await fileHandle.createWritable();
 
-        // Stream copy in chunks to avoid loading the full file in memory.
+        // Use native stream piping for better throughput (still constant-memory).
+        // If progress is needed, count bytes via a TransformStream.
         const total = Number(file.size || 0);
-        let written = 0;
+        let readable = file.stream();
+
+        if (typeof onProgress === 'function' && total > 0) {
+            let written = 0;
+            readable = readable.pipeThrough(new TransformStream({
+                transform(chunk, controller) {
+                    controller.enqueue(chunk);
+                    written += chunk?.byteLength || 0;
+                    const percent = Math.round((written / total) * 100);
+                    try { onProgress({ written, total, percent }); } catch (_) {}
+                }
+            }));
+        }
 
         try {
-            const reader = file.stream().getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                if (value) {
-                    await writable.write(value);
-                    written += value.byteLength;
-                    if (total > 0) {
-                        const percent = Math.round((written / total) * 100);
-                        try { onProgress?.({ written, total, percent }); } catch (_) {}
-                    }
-                }
-            }
-        } finally {
-            await writable.close();
+            // pipeTo will close the destination stream on success.
+            await readable.pipeTo(writable);
+        } catch (e) {
+            // Best-effort abort to release the file handle.
+            try { await writable.abort(e); } catch (_) {}
+            throw e;
         }
     }
 
@@ -376,6 +380,23 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         await syncVirtualFileToRealInternal(currentDir, virtualPath, fileName, optional);
     }
 
+    async function deleteFileFromIpodRelativePath(ipodHandle, relativePath) {
+        if (!ipodHandle) throw new Error('No iPod handle');
+        const parts = String(relativePath || '').split('/').filter(Boolean);
+        if (parts.length === 0) throw new Error('Invalid destination path');
+
+        const fileName = parts[parts.length - 1];
+        const dirParts = parts.slice(0, -1);
+
+        let currentDir = ipodHandle;
+        for (const dir of dirParts) {
+            currentDir = await currentDir.getDirectoryHandle(dir, { create: false });
+        }
+
+        // Spec: FileSystemDirectoryHandle.removeEntry(name, { recursive? })
+        await currentDir.removeEntry(fileName, { recursive: false });
+    }
+
     return {
         mountpoint,
         verifyIpodStructure,
@@ -385,6 +406,7 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         copyFileToVirtualFS,
         writeFileToIpodRelativePath,
         reserveVirtualPath,
+        deleteFileFromIpodRelativePath,
     };
 }
 

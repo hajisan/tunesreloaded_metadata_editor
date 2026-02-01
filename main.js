@@ -25,6 +25,65 @@ const paths = createPaths({ wasm, mountpoint: '/iPod' });
 const firewireSetup = createFirewireSetup({ log });
 const modals = createModalManager();
 
+// === iPod connection monitor (polling) ===
+let ipodMonitorTimer = null;
+let ipodMonitorBusy = false;
+
+function stopIpodConnectionMonitor() {
+    if (ipodMonitorTimer) {
+        clearInterval(ipodMonitorTimer);
+        ipodMonitorTimer = null;
+    }
+    ipodMonitorBusy = false;
+}
+
+async function handleIpodDisconnected(reason = 'Folder no longer accessible') {
+    if (!appState.isConnected) return;
+
+    stopIpodConnectionMonitor();
+    log(`iPod disconnected: ${reason}`, 'warning');
+
+    // Best-effort close DB in WASM
+    try { wasm.wasmCall('ipod_close_db'); } catch (_) {}
+
+    // Reset app state
+    appState.isConnected = false;
+    appState.ipodHandle = null;
+    appState.tracks = [];
+    appState.playlists = [];
+    appState.currentPlaylistIndex = -1;
+    appState.pendingUploads = [];
+    appState.pendingFileDeletes = [];
+
+    updateConnectionStatus(false);
+    enableUIIfReady({ wasmReady: appState.wasmReady, isConnected: false });
+
+    // Clear UI
+    renderTracks({ tracks: [], escapeHtml });
+    renderSidebarPlaylists();
+}
+
+function startIpodConnectionMonitor() {
+    stopIpodConnectionMonitor();
+
+    ipodMonitorTimer = setInterval(async () => {
+        if (ipodMonitorBusy) return;
+        if (!appState.isConnected || !appState.ipodHandle) return;
+
+        ipodMonitorBusy = true;
+        try {
+            // Lightweight probe: does the expected iPod structure still exist?
+            const control = await appState.ipodHandle.getDirectoryHandle('iPod_Control', { create: false });
+            const itunes = await control.getDirectoryHandle('iTunes', { create: false });
+            await itunes.getFileHandle('iTunesDB', { create: false });
+        } catch (e) {
+            await handleIpodDisconnected(e?.name || e?.message || 'Disconnected');
+        } finally {
+            ipodMonitorBusy = false;
+        }
+    }, 3000);
+}
+
 function getLastWasmErrorMessage() {
     try {
         const ptr = wasm.wasmCall('ipod_get_last_error');
@@ -47,6 +106,7 @@ async function parseDatabase() {
     appState.isConnected = true;
     updateConnectionStatus(true);
     enableUIIfReady({ wasmReady: appState.wasmReady, isConnected: appState.isConnected });
+    startIpodConnectionMonitor();
 
     await refreshCurrentView();
     log('Database loaded successfully', 'success');
@@ -231,8 +291,8 @@ async function saveDatabase() {
         const res = await fsSync.syncDbToIpod(appState.ipodHandle, {
             onProgress: ({ percent, detail }) => {
                 setUploadModalState({
-                    title: 'Uploading to iPod...',
-                    status: 'Uploading to iPod...',
+                    title: 'Syncing to iPod...',
+                    status: 'Syncing to iPod...',
                     detail: detail || '',
                     percent,
                     showOk: false,
@@ -251,6 +311,19 @@ async function saveDatabase() {
             });
             return;
         }
+
+        // 3b) Apply deferred file deletions on the real iPod filesystem
+        const pendingDeletes = appState.pendingFileDeletes || [];
+        if (pendingDeletes.length > 0) {
+            for (const relFsPath of pendingDeletes) {
+                try {
+                    await fsSync.deleteFileFromIpodRelativePath(appState.ipodHandle, relFsPath);
+                    log(`Deleted file: ${relFsPath}`, 'info');
+                } catch (e) {
+                    log(`Could not delete file: ${relFsPath} (${e?.message || e})`, 'warning');
+                }
+            }
+        }
     } catch (e) {
         log(`Sync failed: ${e?.message || e}`, 'error');
         setUploadModalState({
@@ -265,14 +338,15 @@ async function saveDatabase() {
 
     // Clear queue only after successful iPod sync so the '*' goes away
     appState.pendingUploads = [];
+    appState.pendingFileDeletes = [];
 
     // 4) Refresh UI
     await refreshCurrentView();
     log('Sync complete', 'success');
 
     setUploadModalState({
-        title: 'Done uploading!',
-        status: 'Done uploading! Safe to disconnect.',
+        title: 'Done syncing!',
+        status: 'Done syncing! Safe to disconnect.',
         detail: '',
         percent: 100,
         showOk: true,
@@ -421,8 +495,21 @@ async function deletePlaylist(playlistIndex) {
 // === Track management ===
 async function deleteTrack(trackId) {
     if (!confirm('Are you sure you want to delete this track?')) return;
+
+    // Grab the file path before removing the track (indexes shift after delete).
+    const track = wasm.wasmGetJson('ipod_get_track_json', trackId);
+    const ipodPath = track?.ipod_path;
+    const relFsPath = ipodPath ? paths.toRelFsPathFromIpodDbPath(ipodPath) : null;
+
     const result = wasm.wasmCallWithError('ipod_remove_track', trackId);
     if (result !== 0) return;
+
+    // Defer the actual file delete until the next "Sync iPod".
+    if (relFsPath) {
+        appState.pendingFileDeletes = [...(appState.pendingFileDeletes || []), relFsPath];
+        log(`Marked for deletion on next sync: ${relFsPath}`, 'info');
+    }
+
     await refreshCurrentView();
     log(`Deleted track ID: ${trackId}`, 'success');
 }
