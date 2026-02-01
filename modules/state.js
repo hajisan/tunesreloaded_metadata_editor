@@ -15,6 +15,7 @@ export function createAppState(initialState = {}) {
         wasmReady: false,
         pendingUploads: [], // queued files to be processed on sync
         pendingFileDeletes: [], // relative FS paths to delete on next sync
+        selectedTrackIds: [], // numeric track indices selected in the UI
         ...initialState,
     };
 
@@ -79,5 +80,9 @@ export function createAppState(initialState = {}) {
         // Deferred file deletions
         get pendingFileDeletes() { return state.pendingFileDeletes; },
         set pendingFileDeletes(v) { set('pendingFileDeletes', v); },
+
+        // Track selection
+        get selectedTrackIds() { return state.selectedTrackIds; },
+        set selectedTrackIds(v) { set('selectedTrackIds', v); },
     };
 }

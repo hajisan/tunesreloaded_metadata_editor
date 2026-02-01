@@ -32,11 +32,13 @@ export function enableUIIfReady({ wasmReady, isConnected }) {
     });
 }
 
-export function renderTracks({ tracks, escapeHtml }) {
+export function renderTracks({ tracks, escapeHtml, selectedTrackIds } = {}) {
     const tbody = document.getElementById('trackTableBody');
     const table = document.getElementById('trackTable');
     const emptyState = document.getElementById('emptyState');
     if (!tbody || !table || !emptyState) return;
+
+    const selectedSet = new Set(Array.isArray(selectedTrackIds) ? selectedTrackIds : []);
 
     if (!tracks || tracks.length === 0) {
         table.style.display = 'none';
@@ -53,6 +55,9 @@ export function renderTracks({ tracks, escapeHtml }) {
 
     tbody.innerHTML = tracks.map((track, index) => {
         const isQueued = Boolean(track.__queued);
+        const numericId = Number(track.id);
+        const isSelectable = !isQueued && Number.isFinite(numericId) && numericId >= 0;
+        const isSelected = isSelectable && selectedSet.has(numericId);
         const title = escapeHtml(track.title || 'Unknown') + (isQueued ? ' *' : '');
         const artist = escapeHtml(track.artist || (isQueued ? 'Queued' : 'Unknown'));
         const album = escapeHtml(track.album || 'Unknown');
@@ -67,8 +72,12 @@ export function renderTracks({ tracks, escapeHtml }) {
                     Delete
                </button>`;
 
+        const attrs = isSelectable
+            ? `data-track-id="${escapeHtml(String(numericId))}"`
+            : `data-queued="true"`;
+
         return `
-            <tr data-id="${escapeHtml(String(track.id))}" data-track-id="${escapeHtml(String(track.id))}">
+            <tr class="${isSelected ? 'selected' : ''}" data-id="${escapeHtml(String(track.id))}" ${attrs}>
                 <td>${index + 1}</td>
                 <td class="title">${title}</td>
                 <td>${artist}</td>

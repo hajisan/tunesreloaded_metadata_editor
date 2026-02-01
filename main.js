@@ -13,6 +13,7 @@ import { createUploadQueue } from './modules/uploadQueue.js';
 import { createTrackOps } from './modules/trackOps.js';
 import { createSyncPipeline } from './modules/syncPipeline.js';
 import { transcodeFlacToAlacM4a } from './modules/transcode.js';
+import { createTrackSelection } from './modules/trackSelection.js';
 
 /**
  * TunesReloaded - module entrypoint
@@ -74,7 +75,8 @@ async function loadTracks() {
     const tracks = wasm.wasmGetJson('ipod_get_all_tracks_json');
     if (tracks) {
         appState.tracks = tracks;
-        renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+        renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml, selectedTrackIds: appState.selectedTrackIds });
+        trackSelection?.applySelectionToDom?.();
 
         // Ensure the sidebar "All Tracks" count reflects the latest track list,
         // since refreshCurrentView() loads playlists before tracks.
@@ -111,7 +113,8 @@ function renderSidebarPlaylists() {
 
 function rerenderAllTracksIfVisible() {
     if (appState.currentPlaylistIndex !== -1) return;
-    renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+    renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml, selectedTrackIds: appState.selectedTrackIds });
+    trackSelection?.applySelectionToDom?.();
     renderSidebarPlaylists();
 }
 
@@ -135,7 +138,8 @@ async function loadPlaylistTracks(index) {
 
     const tracks = wasm.wasmGetJson('ipod_get_playlist_tracks_json', index);
     if (tracks) {
-        renderTracks({ tracks, escapeHtml });
+        renderTracks({ tracks, escapeHtml, selectedTrackIds: appState.selectedTrackIds });
+        trackSelection.applySelectionToDom();
     }
 }
 
@@ -176,6 +180,8 @@ const trackOps = createTrackOps({
     refreshCurrentView,
     loadPlaylists,
 });
+
+const trackSelection = createTrackSelection({ appState, log });
 
 const syncPipeline = createSyncPipeline({
     appState,
@@ -356,10 +362,12 @@ async function uploadTracks() {
 
 // === Search / playlist selection ===
 function selectPlaylist(index) {
+    trackSelection.clearSelection();
     appState.currentPlaylistIndex = index;
     renderSidebarPlaylists();
     if (index === -1) {
-        renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+        renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml, selectedTrackIds: appState.selectedTrackIds });
+        trackSelection.applySelectionToDom();
     } else {
         loadPlaylistTracks(index);
     }
@@ -369,7 +377,10 @@ function filterTracks() {
     const query = (document.getElementById('searchBox')?.value || '').toLowerCase();
     const idx = appState.currentPlaylistIndex;
     if (!query) {
-        if (idx === -1) renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+        if (idx === -1) {
+            renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml, selectedTrackIds: appState.selectedTrackIds });
+            trackSelection.applySelectionToDom();
+        }
         else loadPlaylistTracks(idx);
         return;
     }
@@ -380,7 +391,8 @@ function filterTracks() {
         (track.artist && track.artist.toLowerCase().includes(query)) ||
         (track.album && track.album.toLowerCase().includes(query))
     );
-    renderTracks({ tracks: filtered, escapeHtml });
+    renderTracks({ tracks: filtered, escapeHtml, selectedTrackIds: appState.selectedTrackIds });
+    trackSelection.applySelectionToDom();
 }
 
 // === Drag & drop ===
@@ -425,11 +437,16 @@ const contextMenu = createContextMenu({
     log,
     getAllPlaylists: () => appState.playlists,
     getCurrentPlaylistIndex: () => appState.currentPlaylistIndex,
+    getSelectedTrackIds: () => appState.selectedTrackIds,
+    ensureTrackSelected: (trackId) => trackSelection.ensureTrackSelected(trackId),
     actions: {
         deletePlaylist,
         deleteTrack: trackOps.deleteTrack,
+        deleteTracks: trackOps.deleteTracks,
         addTrackToPlaylist: trackOps.addTrackToPlaylist,
+        addTracksToPlaylist: trackOps.addTracksToPlaylist,
         removeTrackFromPlaylist: trackOps.removeTrackFromPlaylist,
+        removeTracksFromPlaylist: trackOps.removeTracksFromPlaylist,
     }
 });
 
@@ -483,6 +500,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     contextMenu.initContextMenu();
     contextMenu.attachPlaylistContextMenus();
     contextMenu.attachTrackContextMenus();
+    trackSelection.attach();
 
     const ok = await wasm.initWasm();
     appState.wasmReady = ok;
@@ -490,6 +508,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 document.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl + A: select all visible tracks in table
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        const tag = String(e.target?.tagName || '').toLowerCase();
+        const isTypingContext =
+            tag === 'input' ||
+            tag === 'textarea' ||
+            tag === 'select' ||
+            e.target?.isContentEditable;
+        if (!isTypingContext) {
+            e.preventDefault();
+            trackSelection.selectAllVisible();
+        }
+        return;
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         if (appState.isConnected) syncPipeline.saveDatabase();

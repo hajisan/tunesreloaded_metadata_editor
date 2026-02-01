@@ -37,12 +37,13 @@ export function createIpodConnectionMonitor({
         appState.currentPlaylistIndex = -1;
         appState.pendingUploads = [];
         appState.pendingFileDeletes = [];
+        appState.selectedTrackIds = [];
 
         updateConnectionStatus?.(false);
         enableUIIfReady?.({ wasmReady: appState.wasmReady, isConnected: false });
 
         // Clear UI
-        renderTracks?.({ tracks: [], escapeHtml });
+        renderTracks?.({ tracks: [], escapeHtml, selectedTrackIds: [] });
         renderSidebarPlaylists?.();
     }
 

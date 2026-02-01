@@ -1,5 +1,12 @@
-export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistIndex, actions }) {
-    const state = { type: null, playlistIndex: null, trackId: null };
+export function createContextMenu({
+    log,
+    getAllPlaylists,
+    getCurrentPlaylistIndex,
+    getSelectedTrackIds,
+    ensureTrackSelected,
+    actions
+}) {
+    const state = { type: null, playlistIndex: null, trackIds: [] };
 
     function showContextMenu(x, y) {
         const menu = document.getElementById('contextMenu');
@@ -14,12 +21,12 @@ export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistInde
         if (menu) menu.classList.remove('show');
         state.type = null;
         state.playlistIndex = null;
-        state.trackId = null;
+        state.trackIds = [];
         const submenu = document.getElementById('playlistSubmenu');
         if (submenu) submenu.innerHTML = '';
     }
 
-    function buildPlaylistSubmenu(trackId) {
+    function buildPlaylistSubmenu(trackIds) {
         const submenu = document.getElementById('playlistSubmenu');
         if (!submenu) return;
         submenu.innerHTML = '';
@@ -45,7 +52,13 @@ export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistInde
             item.className = 'context-submenu-item';
             item.textContent = pl.name || 'Untitled';
             item.onclick = async () => {
-                await actions?.addTrackToPlaylist?.(trackId, idx);
+                if (typeof actions?.addTracksToPlaylist === 'function') {
+                    await actions.addTracksToPlaylist(trackIds, idx);
+                } else {
+                    for (const tid of trackIds) {
+                        await actions?.addTrackToPlaylist?.(tid, idx);
+                    }
+                }
                 hideContextMenu();
             };
             submenu.appendChild(item);
@@ -77,15 +90,27 @@ export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistInde
         });
 
         deleteTrackBtn.addEventListener('click', async () => {
-            if (state.type === 'track' && state.trackId != null) {
-                await actions?.deleteTrack?.(state.trackId);
+            if (state.type === 'track' && state.trackIds?.length) {
+                if (typeof actions?.deleteTracks === 'function') {
+                    await actions.deleteTracks(state.trackIds);
+                } else {
+                    // fallback
+                    for (const tid of state.trackIds) {
+                        await actions?.deleteTrack?.(tid);
+                    }
+                }
                 hideContextMenu();
             }
         });
 
         removeFromPlaylistBtn.addEventListener('click', async () => {
-            if (state.type === 'track' && state.trackId != null) {
-                await actions?.removeTrackFromPlaylist?.(state.trackId);
+            if (state.type === 'track' && state.trackIds?.length) {
+                if (typeof actions?.removeTracksFromPlaylist === 'function') {
+                    await actions.removeTracksFromPlaylist(state.trackIds);
+                } else {
+                    // fallback: remove first only
+                    await actions?.removeTrackFromPlaylist?.(state.trackIds[0]);
+                }
                 hideContextMenu();
             }
         });
@@ -133,7 +158,7 @@ export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistInde
 
             state.type = 'playlist';
             state.playlistIndex = playlistIndex;
-            state.trackId = null;
+            state.trackIds = [];
 
             deletePlaylistBtn.style.display = 'block';
             deleteTrackBtn.style.display = 'none';
@@ -159,7 +184,8 @@ export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistInde
             e.preventDefault();
             e.stopPropagation();
 
-            const trackId = parseInt(row.getAttribute('data-track-id'));
+            const trackId = Number(row.getAttribute('data-track-id'));
+            if (!Number.isFinite(trackId)) return;
 
             const deletePlaylistBtn = document.getElementById('contextDeletePlaylist');
             const deleteTrackBtn = document.getElementById('contextDeleteTrack');
@@ -167,15 +193,24 @@ export function createContextMenu({ log, getAllPlaylists, getCurrentPlaylistInde
             const removeFromPlaylistBtn = document.getElementById('contextRemoveFromPlaylist');
             if (!deletePlaylistBtn || !deleteTrackBtn || !addToPlaylistBtn || !removeFromPlaylistBtn) return;
 
+            // Ensure right-clicked row is part of the selection
+            try { ensureTrackSelected?.(trackId); } catch (_) {}
+
+            const selected = (getSelectedTrackIds?.() || []).filter((n) => Number.isFinite(n));
+            const trackIds = selected.length ? selected : [trackId];
+
             state.type = 'track';
-            state.trackId = trackId;
+            state.trackIds = trackIds;
             state.playlistIndex = getCurrentPlaylistIndex?.() ?? -1;
 
             deletePlaylistBtn.style.display = 'none';
             deleteTrackBtn.style.display = 'block';
             addToPlaylistBtn.style.display = 'block';
 
-            buildPlaylistSubmenu(trackId);
+            // Update labels for multi-select
+            deleteTrackBtn.textContent = trackIds.length > 1 ? `Delete ${trackIds.length} Tracks` : 'Delete Track';
+
+            buildPlaylistSubmenu(trackIds);
 
             const playlists = getAllPlaylists?.() || [];
             const currentIdx = getCurrentPlaylistIndex?.() ?? -1;
