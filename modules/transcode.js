@@ -26,6 +26,8 @@ async function getFfmpeg() {
             // toBlobURL is used to bypass worker import restrictions.
             coreURL: await toBlobURL('/ffmpeg/ffmpeg-core.js', 'text/javascript'),
             wasmURL: await toBlobURL('/ffmpeg/ffmpeg-core.wasm', 'application/wasm'),
+            // Multithread core requires a dedicated worker script.
+            workerURL: await toBlobURL('/ffmpeg/ffmpeg-core.worker.js', 'text/javascript'),
         });
         ffmpegSingleton = ffmpeg;
         return ffmpegSingleton;
