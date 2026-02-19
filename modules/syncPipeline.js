@@ -13,6 +13,7 @@ export function createSyncPipeline({
     transcodeFlacToAlacM4a,
     getFiletypeFromName,
     formatDuration,
+    firewireSetup,
 } = {}) {
     function setUploadModalState({ title, status, detail, percent, showOk, okLabel } = {}) {
         const titleEl = document.getElementById('uploadTitle');
@@ -255,6 +256,19 @@ export function createSyncPipeline({
                 okLabel: 'OK',
             });
             return;
+        }
+
+        // 2b) Re-sign iTunesCDB + Locations.itdb.cbk with the standalone hashAB WASM
+        //     Only Nano 6th/7th gen use hashAB signing.
+        if (firewireSetup?.needsHashAB?.()) {
+            const fwGuid = firewireSetup.getFirewireGuidHex();
+            if (fwGuid) {
+                try {
+                    await fsSync.reSignDatabaseFiles(fwGuid);
+                } catch (e) {
+                    log?.(`hashAB re-sign failed: ${e?.message || e}`, 'warning');
+                }
+            }
         }
 
         // 3) Copy iTunesDB (+ optional iTunesSD) to iPod, then apply deletions

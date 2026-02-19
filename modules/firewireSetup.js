@@ -44,9 +44,9 @@ export function createFirewireSetup({ log }) {
         // iPod Nano 3rd-7th Gen (ENCRYPTED)
         0x1262: { name: 'iPod Nano 3rd Gen', modelNumStr: 'MA978', encrypted: true },
         0x1263: { name: 'iPod Nano 4th Gen', modelNumStr: 'MB754', encrypted: true },
-        0x1265: { name: 'iPod Nano 5th Gen', modelNumStr: 'MC031', encrypted: true },
+        0x1265: { name: 'iPod Nano 5th Gen', modelNumStr: 'MC031', encrypted: true, templateFile: '5_Nano_SysInfoExtended.plist' },
         0x1266: { name: 'iPod Nano 6th Gen', modelNumStr: 'MC525', encrypted: true },
-        0x1267: { name: 'iPod Nano 7th Gen', modelNumStr: 'MD480', encrypted: true },
+        0x1267: { name: 'iPod Nano 7th Gen', modelNumStr: 'MD480', encrypted: true, templateFile: '7_nano_SysInfoExtended.plist' },
         
         // iPod Shuffle (non-encrypted, no database - but include for completeness)
         0x1300: { name: 'iPod Shuffle 1st Gen', modelNumStr: 'M9724', encrypted: false },
@@ -55,16 +55,64 @@ export function createFirewireSetup({ log }) {
         0x1303: { name: 'iPod Shuffle 4th Gen', modelNumStr: 'MC749', encrypted: false },
     };
 
-    // Known 5th-gen nano order number prefixes (first 5 chars)
-    const NANO5G_MODEL_PREFIXES = new Set([
-        // 8 GB
-        'MC031', 'MC027', 'MC037', 'MC040', 'MC046', 'MC050', 'MC034', 'MC043', 'MC049',
-        // 16 GB
-        'MC062', 'MC060', 'MC066', 'MC068', 'MC072', 'MC075', 'MC064', 'MC070', 'MC074',
+    // Model number prefix -> template file for devices that need a SysInfoExtended template.
+    // Each prefix (first 5 chars of order number) maps to the plist template to use.
+    const SYSINFO_EXTENDED_TEMPLATES = new Map([
+        // Nano 5th Gen – 8 GB
+        ['MC031', '5_Nano_SysInfoExtended.plist'],
+        ['MC027', '5_Nano_SysInfoExtended.plist'],
+        ['MC037', '5_Nano_SysInfoExtended.plist'],
+        ['MC040', '5_Nano_SysInfoExtended.plist'],
+        ['MC046', '5_Nano_SysInfoExtended.plist'],
+        ['MC050', '5_Nano_SysInfoExtended.plist'],
+        ['MC034', '5_Nano_SysInfoExtended.plist'],
+        ['MC043', '5_Nano_SysInfoExtended.plist'],
+        ['MC049', '5_Nano_SysInfoExtended.plist'],
+        // Nano 5th Gen – 16 GB
+        ['MC062', '5_Nano_SysInfoExtended.plist'],
+        ['MC060', '5_Nano_SysInfoExtended.plist'],
+        ['MC066', '5_Nano_SysInfoExtended.plist'],
+        ['MC068', '5_Nano_SysInfoExtended.plist'],
+        ['MC072', '5_Nano_SysInfoExtended.plist'],
+        ['MC075', '5_Nano_SysInfoExtended.plist'],
+        ['MC064', '5_Nano_SysInfoExtended.plist'],
+        ['MC070', '5_Nano_SysInfoExtended.plist'],
+        ['MC074', '5_Nano_SysInfoExtended.plist'],
+        // Nano 7th Gen (2012)
+        ['MD475', '7_nano_SysInfoExtended.plist'],  // Pink
+        ['MD476', '7_nano_SysInfoExtended.plist'],  // Yellow
+        ['MD477', '7_nano_SysInfoExtended.plist'],  // Blue
+        ['MD478', '7_nano_SysInfoExtended.plist'],  // Green
+        ['MD479', '7_nano_SysInfoExtended.plist'],  // Purple
+        ['MD480', '7_nano_SysInfoExtended.plist'],  // Silver
+        ['MD481', '7_nano_SysInfoExtended.plist'],  // Slate
+        ['MD744', '7_nano_SysInfoExtended.plist'],  // (PRODUCT) RED
+        ['ME971', '7_nano_SysInfoExtended.plist'],  // Space Gray (2013 Slate replacement)
+        // Nano 7th Gen (2015 refresh)
+        ['MKN02', '7_nano_SysInfoExtended.plist'],  // Blue
+        ['MKN22', '7_nano_SysInfoExtended.plist'],  // Silver
+        ['MKN52', '7_nano_SysInfoExtended.plist'],  // Space Gray
+        ['MKN72', '7_nano_SysInfoExtended.plist'],  // (PRODUCT) RED
+        ['MKMV2', '7_nano_SysInfoExtended.plist'],  // Hot Pink
+        ['MKMX2', '7_nano_SysInfoExtended.plist'],  // Gold
     ]);
 
     // Store device info from WebUSB for later use
     let detectedDevice = null;
+    // Cached FirewireGuid hex (set during checkFirewireGuid or performSetup)
+    let firewireGuidHex = null;
+    // Cached ModelNumStr (set during checkFirewireGuid or performSetup)
+    let cachedModelNumStr = null;
+
+    const HASHAB_MODEL_PREFIXES = new Set([
+        // Nano 6th gen (representative)
+        'MC525',
+        // Nano 7th gen (2012)
+        'MD475', 'MD476', 'MD477', 'MD478', 'MD479', 'MD480', 'MD481',
+        'MD744', 'ME971',
+        // Nano 7th gen (2015 refresh)
+        'MKN02', 'MKN22', 'MKN52', 'MKN72', 'MKMV2', 'MKMX2',
+    ]);
 
     /**
      * Check if this iPod model requires encryption (FirewireGuid)
@@ -88,10 +136,14 @@ export function createFirewireSetup({ log }) {
         return productId in IPOD_MODELS;
     }
 
-    function isNano5gModelNumStr(modelNumStr) {
-        if (!modelNumStr) return false;
+    /**
+     * Returns the template filename if this model needs a SysInfoExtended template,
+     * or null if it does not.
+     */
+    function getTemplateForModel(modelNumStr) {
+        if (!modelNumStr) return null;
         const code = String(modelNumStr).trim().slice(0, 5).toUpperCase();
-        return NANO5G_MODEL_PREFIXES.has(code);
+        return SYSINFO_EXTENDED_TEMPLATES.get(code) ?? null;
     }
 
     /**
@@ -118,20 +170,18 @@ export function createFirewireSetup({ log }) {
         }
     }
 
-    async function ensureNano5gSysInfoExtended(ipodHandle, {
+    async function ensureSysInfoExtended(ipodHandle, {
         firewireGuidHex,
         modelNumStr,
         productId,
     } = {}) {
         try {
-            // If we don't know it's a Nano 5G, bail.
-            let isNano5g = false;
-            if (modelNumStr && isNano5gModelNumStr(modelNumStr)) {
-                isNano5g = true;
-            } else if (productId && IPOD_MODELS[productId]?.name?.includes('Nano 5th Gen')) {
-                isNano5g = true;
+            // Determine which template file this model needs (if any).
+            let templateFile = getTemplateForModel(modelNumStr);
+            if (!templateFile && productId) {
+                templateFile = IPOD_MODELS[productId]?.templateFile ?? null;
             }
-            if (!isNano5g) return;
+            if (!templateFile) return;
 
             const iPodControl = await ipodHandle.getDirectoryHandle('iPod_Control', { create: true });
             const deviceDir = await iPodControl.getDirectoryHandle('Device', { create: true });
@@ -150,19 +200,19 @@ export function createFirewireSetup({ log }) {
                 fwHex = fwHex.slice(2);
             }
             if (!fwHex) {
-                log?.('Nano 5G detected but no FireWire GUID available for SysInfoExtended; skipping template write.', 'warning');
+                log?.('No FireWire GUID available for SysInfoExtended; skipping template write.', 'warning');
                 return;
             }
 
             // Load the template plist from our bundled assets.
             let template;
             try {
-                const url = new URL('../device_info/5_Nano_SysInfoExtended.plist', import.meta.url);
+                const url = new URL(`../device_info/${templateFile}`, import.meta.url);
                 const resp = await fetch(url);
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 template = await resp.text();
             } catch (e) {
-                log?.(`Failed to load Nano 5G SysInfoExtended template: ${e?.message || e}`, 'error');
+                log?.(`Failed to load SysInfoExtended template (${templateFile}): ${e?.message || e}`, 'error');
                 return;
             }
 
@@ -174,9 +224,9 @@ export function createFirewireSetup({ log }) {
             await writable.write(replaced);
             await writable.close();
 
-            log?.('Wrote SysInfoExtended for iPod nano 5th gen', 'success');
+            log?.(`Wrote SysInfoExtended from ${templateFile}`, 'success');
         } catch (e) {
-            log?.(`Failed to ensure SysInfoExtended for Nano 5G: ${e?.message || e}`, 'warning');
+            log?.(`Failed to ensure SysInfoExtended: ${e?.message || e}`, 'warning');
         }
     }
 
@@ -201,23 +251,26 @@ export function createFirewireSetup({ log }) {
             const hasModelNumStr = sysInfoContent.includes('ModelNumStr');
 
             if (hasModelNumStr) {
-                // Extract FirewireGuid and ModelNumStr for Nano 5G SysInfoExtended seeding.
+                // Extract FirewireGuid and ModelNumStr for SysInfoExtended seeding.
                 const lines = sysInfoContent.split('\n');
                 let firewireLine = lines.find((l) => l.startsWith('FirewireGuid'));
                 let modelLine = lines.find((l) => l.startsWith('ModelNumStr'));
-                let firewireGuidHex = '';
+                let fwGuid = '';
                 let modelNumStr = '';
 
                 if (firewireLine) {
                     const val = firewireLine.split(':')[1]?.trim() || '';
-                    firewireGuidHex = val;
+                    fwGuid = val.replace(/^0x/i, '');
                 }
+                if (fwGuid) firewireGuidHex = fwGuid;
+
                 if (modelLine) {
                     modelNumStr = modelLine.split(':')[1]?.trim() || '';
                 }
+                if (modelNumStr) cachedModelNumStr = modelNumStr;
 
-                await ensureNano5gSysInfoExtended(ipodHandle, {
-                    firewireGuidHex,
+                await ensureSysInfoExtended(ipodHandle, {
+                    firewireGuidHex: fwGuid,
                     modelNumStr,
                 });
 
@@ -342,15 +395,19 @@ export function createFirewireSetup({ log }) {
      */
     async function performSetup(ipodHandle) {
         const device = await getDeviceViaWebUSB();
-        
+        firewireGuidHex = String(device.serialNumber || '').replace(/^0x/i, '');
+
         // Always write SysInfo - writeFirewireGuid handles what to include
         await writeFirewireGuid(ipodHandle, device.serialNumber, device.productId);
 
-        // If this is a Nano 5G, seed SysInfoExtended from our template.
-        await ensureNano5gSysInfoExtended(ipodHandle, {
+        const modelStr = getModelInfo(device.productId)?.modelNumStr;
+        if (modelStr) cachedModelNumStr = modelStr;
+
+        // If this model needs it, seed SysInfoExtended from our template.
+        await ensureSysInfoExtended(ipodHandle, {
             firewireGuidHex: device.serialNumber,
             productId: device.productId,
-            modelNumStr: getModelInfo(device.productId)?.modelNumStr,
+            modelNumStr: modelStr,
         });
         
         return device.serialNumber;
@@ -366,5 +423,10 @@ export function createFirewireSetup({ log }) {
         isKnownModel,
         getModelInfo,
         getDetectedDevice: () => detectedDevice,
+        getFirewireGuidHex: () => firewireGuidHex,
+        needsHashAB: () => {
+            const prefix = (cachedModelNumStr || '').slice(0, 5).toUpperCase();
+            return HASHAB_MODEL_PREFIXES.has(prefix);
+        },
     };
 }

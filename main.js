@@ -200,6 +200,7 @@ const syncPipeline = createSyncPipeline({
     transcodeFlacToAlacM4a: transcodePool.transcodeFlacToAlacM4a,
     getFiletypeFromName,
     formatDuration,
+    firewireSetup,
 });
 
 // === Connect / FS ===
