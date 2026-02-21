@@ -542,10 +542,13 @@ Object.assign(window, {
 document.addEventListener('DOMContentLoaded', async () => {
     log('TunesReloaded initialized');
 
-    // Check browser compatibility first
-    if (!('showDirectoryPicker' in window)) {
+    // Check for required web features (no browser sniffing — any browser with these APIs works)
+    const requiredFeatures = [];
+    if (!('showDirectoryPicker' in window)) requiredFeatures.push('File System Access API');
+    if (!navigator.usb) requiredFeatures.push('WebUSB');
+    if (requiredFeatures.length > 0) {
         isBrowserSupported = false;
-        log('File System Access API not supported. Use Chrome or Edge.', 'error');
+        log(`Missing required features: ${requiredFeatures.join(', ')}. Try a browser that supports these (e.g. Chrome, Edge, Brave).`, 'error');
         const btn = document.getElementById('connectBtn');
         if (btn) btn.disabled = true;
     }
